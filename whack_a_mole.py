@@ -46,8 +46,9 @@ MOLE_WIDTH = 110
 MOLE_HEIGHT = 125
 MOLE_VERTICAL_OFFSET = 23
 
-BACKGROUND_IMAGE_NAME = "retro_game_background.png.jpg"
+BACKGROUND_IMAGE_NAME = "background.png.jpg"
 MOLE_IMAGE_NAME = "mole.png"
+HAMMER_IMAGE_NAME = "hammer.png"
 
 BACKGROUND_DARKNESS = 60
 
@@ -70,7 +71,12 @@ RED = (255, 80, 80)
 PANEL_COLOUR = (20, 10, 35, 220)
 PANEL_BORDER_COLOUR = PINK
 
-
+SOIL_COLOURS = [
+    (120, 72, 35),
+    (150, 90, 45),
+    (180, 115, 60),
+    (95, 55, 25),
+]
 # =============================================================================
 # FILE PATHS
 # =============================================================================
@@ -78,6 +84,7 @@ PANEL_BORDER_COLOUR = PINK
 PROJECT_FOLDER = Path(__file__).resolve().parent
 BACKGROUND_PATH = PROJECT_FOLDER / BACKGROUND_IMAGE_NAME
 MOLE_PATH = PROJECT_FOLDER / MOLE_IMAGE_NAME
+HAMMER_PATH = PROJECT_FOLDER / HAMMER_IMAGE_NAME
 
 
 # =============================================================================
@@ -226,27 +233,27 @@ def draw_background(surface, background):
 def draw_holes(surface):
     """Draw all mole holes."""
     for x, y in HOLE_POSITIONS:
-        pygame.draw.ellipse(
-            surface,
-            PINK,
-            (
-                x - HOLE_WIDTH // 2 - 5,
-                y - HOLE_HEIGHT // 2 - 5,
-                HOLE_WIDTH + 10,
-                HOLE_HEIGHT + 10,
-            ),
-        )
+        # pygame.draw.ellipse(
+        #     surface,
+        #     PINK,
+        #     (
+        #         x - HOLE_WIDTH // 2 - 5,
+        #         y - HOLE_HEIGHT // 2 - 5,
+        #         HOLE_WIDTH + 10,
+        #         HOLE_HEIGHT + 10,
+        #     ),
+        # )
 
-        pygame.draw.ellipse(
-            surface,
-            PURPLE,
-            (
-                x - HOLE_WIDTH // 2 - 2,
-                y - HOLE_HEIGHT // 2 - 2,
-                HOLE_WIDTH + 4,
-                HOLE_HEIGHT + 4,
-            ),
-        )
+        # pygame.draw.ellipse(
+        #     surface,
+        #     PURPLE,
+        #     (
+        #         x - HOLE_WIDTH // 2 - 2,
+        #         y - HOLE_HEIGHT // 2 - 2,
+        #         HOLE_WIDTH + 4,
+        #         HOLE_HEIGHT + 4,
+        #     ),
+        # )
 
         pygame.draw.ellipse(
             surface,
@@ -309,7 +316,7 @@ def draw_hud(surface, font, small_font, score, time_remaining):
     )
 
     title_text = font.render(
-        "RETRO WHACK-A-MOLE",
+        " WHACK-A-MOLE GAME",
         True,
         WHITE,
     )
@@ -317,7 +324,7 @@ def draw_hud(surface, font, small_font, score, time_remaining):
     instruction_text = small_font.render(
         "Double-click the mole",
         True,
-        LIGHT_PURPLE,
+        WHITE,
     )
 
     timer_text = font.render(
@@ -351,22 +358,25 @@ def draw_hud(surface, font, small_font, score, time_remaining):
     )
 
 
-def draw_cursor(surface, position, flashing):
-    radius = 10 + (7 if flashing else 0)
+def draw_hammer(surface, hammer_image, position, hitting):
+    """Draw the hammer at the mouse position."""
 
-    pygame.draw.circle(
-        surface,
-        YELLOW,
-        position,
-        radius,
+    if hitting:
+        # Rotate hammer when clicking
+        hammer = pygame.transform.rotate(
+            hammer_image,
+            -35
+        )
+    else:
+        hammer = hammer_image
+
+    hammer_rect = hammer.get_rect(
+        center=position
     )
 
-    pygame.draw.circle(
-        surface,
-        WHITE,
-        position,
-        radius,
-        width=2,
+    surface.blit(
+        hammer,
+        hammer_rect
     )
 
 
@@ -402,13 +412,13 @@ def draw_game_over(surface, large_font, medium_font, small_font, score):
     restart_text = small_font.render(
         "Press R to play again",
         True,
-        LIGHT_PURPLE,
+        WHITE,
     )
 
     quit_text = small_font.render(
         "Press ESC to quit",
         True,
-        LIGHT_PURPLE,
+        WHITE,
     )
 
     surface.blit(
@@ -444,13 +454,57 @@ def draw_game_over(surface, large_font, medium_font, small_font, score):
 # MOLE CLASS
 # =============================================================================
 
+class SoilParticle:
+    """A small piece of soil thrown from the hole."""
+
+    def __init__(self, x, y):
+        self.x = x + random.randint(-35, 35)
+        self.y = y + random.randint(-8, 8)
+
+        self.velocity_x = random.uniform(-5.0, 5.0)
+        self.velocity_y = random.uniform(-10.0, -4.0)
+
+        self.gravity = 0.35
+        self.radius = random.randint(3, 7)
+        self.colour = random.choice(SOIL_COLOURS)
+        self.life = random.randint(25, 45)
+
+    def update(self):
+        self.x += self.velocity_x
+        self.y += self.velocity_y
+        self.velocity_y += self.gravity
+        self.life -= 1
+
+    def draw(self, surface):
+        pygame.draw.circle(
+            surface,
+            self.colour,
+            (int(self.x), int(self.y)),
+            self.radius,
+        )
+
+    def is_dead(self):
+        return self.life <= 0
+
+
 class Mole:
     def __init__(self, image):
         self.image = image
         self.position = random.choice(HOLE_POSITIONS)
         self.spawn_time = pygame.time.get_ticks()
+
         self.hit = False
         self.hit_time = 0
+
+        # Create the soil particles when the mole appears.
+        self.soil_particles = []
+
+        x, y = self.position
+
+        for _ in range(25):
+            self.soil_particles.append(
+                SoilParticle(x, y)
+            )
 
     def contains(self, point):
         """Return True when a click lands on the visible mole."""
@@ -487,6 +541,19 @@ class Mole:
     def draw(self, surface):
         x, hole_y = self.position
 
+        # Update and draw the flying soil.
+        for particle in self.soil_particles:
+            particle.update()
+            particle.draw(surface)
+
+        # Remove soil particles whose animation has finished.
+        self.soil_particles = [
+            particle
+            for particle in self.soil_particles
+            if not particle.is_dead()
+        ]
+
+        # Animate the mole rising from the hole.
         age_ms = pygame.time.get_ticks() - self.spawn_time
         rise_progress = min(1, age_ms / 180)
         rise_amount = round(22 * rise_progress)
@@ -522,7 +589,6 @@ class Mole:
                 (end_x, end_y),
                 width=4,
             )
-
 
 # =============================================================================
 # GAME STATE
@@ -577,6 +643,7 @@ def run_game():
     pygame.display.set_caption(
         "ENGG3000 Whack-a-Mole"
     )
+    pygame.mouse.set_visible(False)
 
     clock = pygame.time.Clock()
 
@@ -606,6 +673,16 @@ def run_game():
         mole_original = load_image(
             MOLE_PATH,
             use_alpha=True,
+        )
+
+        hammer_image = load_image(
+            HAMMER_PATH,
+            use_alpha=True,
+        )
+
+        hammer_image = pygame.transform.smoothscale(
+            hammer_image,
+            (90, 90),
         )
 
     except (FileNotFoundError, pygame.error) as error:
@@ -697,20 +774,21 @@ def run_game():
 
                 state["mole"].draw(screen)
 
-                cursor_position = pygame.mouse.get_pos()
+            cursor_position = pygame.mouse.get_pos()
 
-                cursor_is_flashing = (
+            cursor_is_flashing = (
                     pygame.time.get_ticks()
                     < state["cursor_flash_until"]
                 )
 
-                draw_cursor(
+            draw_hammer(
                     screen,
+                    hammer_image,
                     cursor_position,
                     cursor_is_flashing,
                 )
 
-                draw_hud(
+            draw_hud(
                     screen,
                     medium_font,
                     small_font,
