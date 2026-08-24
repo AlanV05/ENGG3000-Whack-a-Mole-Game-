@@ -52,8 +52,7 @@ HAMMER_IMAGE_NAME = "hammer.png"
 
 BACKGROUND_DARKNESS = 60
 
-DOUBLE_CLICK_TIME_MS = 400
-DOUBLE_CLICK_DISTANCE = 35
+
 
 REMOVE_BLACK_FROM_MOLE = True
 BLACK_TOLERANCE = 35
@@ -322,10 +321,10 @@ def draw_hud(surface, font, small_font, score, time_remaining):
     )
 
     instruction_text = small_font.render(
-        "Double-click the mole",
-        True,
-        WHITE,
-    )
+    "Click the mole",
+    True,
+    WHITE,
+)
 
     timer_text = font.render(
         f"Time: {max(0, math.ceil(time_remaining))}",
@@ -600,33 +599,11 @@ def create_new_game(mole_image):
         "start_time": pygame.time.get_ticks(),
         "mole": Mole(mole_image),
         "game_over": False,
-        "last_click_time": None,
-        "last_click_position": None,
+
         "cursor_flash_until": 0,
     }
 
 
-def is_double_click(state, click_position, click_time):
-    last_click_time = state["last_click_time"]
-    last_click_position = state["last_click_position"]
-
-    if (
-        last_click_time is None
-        or last_click_position is None
-    ):
-        return False
-
-    time_gap = click_time - last_click_time
-
-    distance = math.hypot(
-        click_position[0] - last_click_position[0],
-        click_position[1] - last_click_position[1],
-    )
-
-    return (
-        time_gap <= DOUBLE_CLICK_TIME_MS
-        and distance <= DOUBLE_CLICK_DISTANCE
-    )
 
 
 # =============================================================================
@@ -700,8 +677,11 @@ def run_game():
     state = create_new_game(mole_image)
 
     running = True
-
     while running:
+
+        # =============================================================
+        # HANDLE EVENTS
+        # =============================================================
         for event in pygame.event.get():
 
             if event.type == pygame.QUIT:
@@ -718,42 +698,41 @@ def run_game():
                 ):
                     state = create_new_game(mole_image)
 
+            # ---------------------------------------------------------
+            # SINGLE CLICK HIT
+            # ---------------------------------------------------------
             elif (
                 event.type == pygame.MOUSEBUTTONDOWN
                 and event.button == 1
                 and not state["game_over"]
             ):
-                click_time = pygame.time.get_ticks()
                 click_position = event.pos
 
-                if is_double_click(
-                    state,
-                    click_position,
-                    click_time,
+                # Hammer animation
+                state["cursor_flash_until"] = (
+                    pygame.time.get_ticks() + 160
+                )
+
+                mole = state["mole"]
+
+                # Check whether ONE click hit the mole
+                if (
+                    not mole.hit
+                    and mole.contains(click_position)
                 ):
-                    state["cursor_flash_until"] = (
-                        click_time + 160
-                    )
+                    mole.register_hit()
+                    state["score"] += 1
 
-                    mole = state["mole"]
-
-                    if (
-                        not mole.hit
-                        and mole.contains(click_position)
-                    ):
-                        mole.register_hit()
-                        state["score"] += 1
-
-                    state["last_click_time"] = None
-                    state["last_click_position"] = None
-
-                else:
-                    state["last_click_time"] = click_time
-                    state["last_click_position"] = click_position
-
+        # =============================================================
+        # DRAW GAME
+        # IMPORTANT: THIS IS OUTSIDE THE EVENT LOOP
+        # =============================================================
         draw_background(screen, background)
         draw_holes(screen)
 
+        # =============================================================
+        # GAME LOGIC
+        # =============================================================
         if not state["game_over"]:
 
             elapsed_seconds = (
@@ -762,41 +741,55 @@ def run_game():
             ) / 1000
 
             time_remaining = (
-                ROUND_LENGTH_SECONDS - elapsed_seconds
+                ROUND_LENGTH_SECONDS
+                - elapsed_seconds
             )
 
             if time_remaining <= 0:
                 state["game_over"] = True
 
             else:
+
+                # Remove old mole and create a new one
                 if state["mole"].should_be_removed():
                     state["mole"] = Mole(mole_image)
 
+                # Draw current mole
                 state["mole"].draw(screen)
 
+            # ---------------------------------------------------------
+            # HAMMER
+            # ---------------------------------------------------------
             cursor_position = pygame.mouse.get_pos()
 
             cursor_is_flashing = (
-                    pygame.time.get_ticks()
-                    < state["cursor_flash_until"]
-                )
+                pygame.time.get_ticks()
+                < state["cursor_flash_until"]
+            )
 
             draw_hammer(
-                    screen,
-                    hammer_image,
-                    cursor_position,
-                    cursor_is_flashing,
-                )
+                screen,
+                hammer_image,
+                cursor_position,
+                cursor_is_flashing,
+            )
 
+            # ---------------------------------------------------------
+            # SCORE / TIMER / TITLE
+            # ---------------------------------------------------------
             draw_hud(
-                    screen,
-                    medium_font,
-                    small_font,
-                    state["score"],
-                    time_remaining,
-                )
+                screen,
+                medium_font,
+                small_font,
+                state["score"],
+                time_remaining,
+            )
 
+        # =============================================================
+        # GAME OVER SCREEN
+        # =============================================================
         if state["game_over"]:
+
             draw_game_over(
                 screen,
                 large_font,
@@ -805,12 +798,14 @@ def run_game():
                 state["score"],
             )
 
+        # =============================================================
+        # UPDATE DISPLAY
+        # =============================================================
         pygame.display.flip()
         clock.tick(FPS)
 
     pygame.quit()
     sys.exit()
-
 
 if __name__ == "__main__":
     run_game()
