@@ -62,6 +62,17 @@ python3 whack_a_mole.py
 - Restart functionality
 - Custom mole and background images
 
+## Levels 
+
+- Manual level advance: press N during play to jump to the next level (up to 3). HUD shows "Level X/3 - N for next level" when you're not mid-combo.
+
+Level 1: unchanged, standard single mole.
+
+Level 2: build a 5-combo and the next mole that spawns is a Big Mole golden, ~1.7x size, only up for 0.9s (shorter window than normal, so it's a timing test, not a "wait for it" test). There's a half-second "BIG MOLE INCOMING!" telegraph with an empty field right before it appears so it doesn't feel like a cheap surprise. Landing it gives a flat +5 bonus (matches your "5 combo → x5" idea) and always resets the combo, hit or miss.
+
+Level 3: shorter mole timeout (1.1s vs 2s) and a 35% chance each wave that two moles pop in different holes at once. Big Mole logic carries over from level 2 since nothing you said suggested dropping it.
+
+
 ## Project Files
 
 ```text
