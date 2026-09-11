@@ -41,8 +41,32 @@ SCREEN_WIDTH = 900
 SCREEN_HEIGHT = 650
 FPS = 60
 
-ROUND_LENGTH_SECONDS = 60
-MOLE_TIMEOUT_SECONDS = 2.0      # how long a mole stays up before it "escapes"
+LEVELS = [
+    {
+        "name": "Warm Up",
+        "time": 60,
+        "mole_timeout": 2.2,
+        "hits_required": 8
+    },
+    {
+        "name": "Quick Whack",
+        "time": 60,
+        "mole_timeout": 1.6,
+        "hits_required": 12
+    },
+    {
+        "name": "Mole Rush",
+        "time": 60,
+        "mole_timeout": 1.1,
+        "hits_required": 16
+    },
+    {
+        "name": "Expert Mode",
+        "time": 60,
+        "mole_timeout": 0.8,
+        "hits_required": 20
+    }
+]   
 
 HOLE_RADIUS = 55
 MOLE_RADIUS = 45
@@ -456,14 +480,15 @@ class Mole:
 
     MISS_LINES = ["Missed me!", "Too slow!", "Ha! Nice try", "Nyeh heh heh"]
 
-    def __init__(self):
+    def __init__(self, timeout=2.0):
         self.position = random.choice(HOLE_POSITIONS)
         self.spawn_time = pygame.time.get_ticks()
         self.state = Mole.SPAWNING
         self.state_time = self.spawn_time
+        self.timeout = timeout
         self.blink_seed = random.uniform(0, 1000)
         self.miss_line = random.choice(Mole.MISS_LINES)
-        self.star_burst = None  # set on hit
+        self.star_burst = None
 
     # -- state handling ----------------------------------------------------
     def _elapsed_total(self, now):
@@ -473,7 +498,7 @@ class Mole:
         if self.state == Mole.SPAWNING and (now - self.state_time) >= MOLE_SPAWN_MS:
             self.state = Mole.IDLE
             self.state_time = now
-        elif self.state == Mole.IDLE and self._elapsed_total(now) >= MOLE_TIMEOUT_SECONDS:
+        elif self.state == Mole.IDLE and self._elapsed_total(now) >= self.timeout:
             self.state = Mole.MISSED
             self.state_time = now
         elif self.state == Mole.HIT and (now - self.state_time) >= MOLE_HIT_MS:
@@ -482,7 +507,7 @@ class Mole:
             self.state = Mole.HIDDEN
 
     def is_expired(self):
-        return self._elapsed_total(pygame.time.get_ticks()) >= MOLE_TIMEOUT_SECONDS
+        return self._elapsed_total(pygame.time.get_ticks()) >= self.timeout
 
     def contains(self, pos):
         # can only actually be whacked while it's up and hasn't already
@@ -822,7 +847,8 @@ def draw_safety_warning(surface, font_big):
     surface.blit(warning_text, warning_text.get_rect(center=panel.center))
 
 
-def draw_hud(surface, font, small_font, score, time_remaining, combo):
+def draw_hud(surface, font, small_font, score, time_remaining, combo,
+             level_number, level_name, hits_this_level, hits_required, level_time):
     panel_y = SAFETY_ZONE_HEIGHT + 14
     panel_height = 58
     side_panel_width = 185
@@ -844,21 +870,31 @@ def draw_hud(surface, font, small_font, score, time_remaining, combo):
     score_text = font.render(f"{score}", True, COLOR_TEXT)
     surface.blit(score_text, (score_panel.x + 44, score_panel.centery - score_text.get_height() // 2))
 
+    # Level name + progress. Combo is shown on the progress line when active.
+    level_text = small_font.render(
+        f"Level {level_number}: {level_name}", True, COLOR_TEXT
+    )
+    progress_label = f"Hits {hits_this_level}/{hits_required}"
     if combo >= 2:
-        draw_target_icon(surface, (instruction_panel.x + 24, instruction_panel.centery), 10)
-        instruction_text = small_font.render(f"Combo x{combo}!", True, (200, 60, 40))
-        surface.blit(instruction_text, (instruction_panel.x + 42,
-                                         instruction_panel.centery - instruction_text.get_height() // 2))
-    else:
-        instruction_text = small_font.render("Double click the mole to simulate a jump", True, COLOR_TEXT)
-        surface.blit(instruction_text, instruction_text.get_rect(center=instruction_panel.center))
+        progress_label += f"   Combo x{combo}!"
+    progress_text = pygame.font.SysFont("arial", 15, bold=(combo >= 2)).render(
+        progress_label, True, (200, 60, 40) if combo >= 2 else COLOR_TEXT_SOFT
+    )
+    surface.blit(
+        level_text,
+        level_text.get_rect(center=(instruction_panel.centerx, instruction_panel.centery - 10))
+    )
+    surface.blit(
+        progress_text,
+        progress_text.get_rect(center=(instruction_panel.centerx, instruction_panel.centery + 13))
+    )
 
     draw_clock_icon(surface, (time_panel.x + 26, time_panel.centery - 4), 11)
     time_text = font.render(f"{max(0, int(time_remaining))}s", True, COLOR_TEXT)
     surface.blit(time_text, (time_panel.x + 44, time_panel.centery - 4 - time_text.get_height() // 2))
 
-    # timer bar along the bottom edge of the time panel, colour-shifts as time drops
-    frac = clamp(time_remaining / ROUND_LENGTH_SECONDS)
+    # Timer bar uses the current level's duration.
+    frac = clamp(time_remaining / max(1, level_time))
     bar_rect = pygame.Rect(time_panel.x + 14, time_panel.bottom - 10, time_panel.width - 28, 6)
     pygame.draw.rect(surface, (0, 0, 0, 30), bar_rect, border_radius=3)
     if frac > 0.5:
@@ -910,7 +946,7 @@ def draw_title_screen(surface, now, font_title, font_small):
     surface.blit(prompt_surf, prompt_surf.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 70)))
 
 
-def draw_game_over(surface, now, font_big, font_small, score):
+def draw_game_over(surface, now, font_big, font_small, score, won=False):
     draw_background(surface, now)
     overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
     overlay.fill((15, 15, 25, 130))
@@ -919,15 +955,16 @@ def draw_game_over(surface, now, font_big, font_small, score):
     panel = pygame.Rect(SCREEN_WIDTH // 2 - 230, 170, 460, 260)
     draw_glass_panel(surface, panel, radius=20)
 
-    over_text = font_big.render("Time's Up!", True, COLOR_TEXT)
+    title = "You Win!" if won else "Time's Up!"
+    over_text = font_big.render(title, True, COLOR_TEXT)
     score_text = font_small.render(f"Final Score: {score}", True, COLOR_TEXT)
     restart_text = font_small.render("Press R to play again, or ESC to quit", True, COLOR_TEXT_SOFT)
 
     surface.blit(over_text, over_text.get_rect(center=(SCREEN_WIDTH // 2, panel.y + 45)))
     surface.blit(score_text, score_text.get_rect(center=(SCREEN_WIDTH // 2, panel.y + 95)))
 
-    # simple 0-3 star rating just for a bit of payoff on the end screen
-    thresholds = [8, 18, 30]
+    # 0-3 star rating adjusted for the four-level game.
+    thresholds = [25, 50, 80]
     stars_earned = sum(1 for t in thresholds if score >= t)
     for i in range(3):
         cx = SCREEN_WIDTH // 2 - 50 + i * 50
@@ -951,7 +988,7 @@ def run_game():
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     render_target = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))  # lets us screen-shake cheaply
-    pygame.display.set_caption("Whack-a-Mole - ENGG3000 Sprint 1 MVP")
+    pygame.display.set_caption("Whack-a-Mole - ENGG3000 Multi-Level Prototype")
     clock = pygame.time.Clock()
 
     font = pygame.font.SysFont("arial", 28)
@@ -963,10 +1000,12 @@ def run_game():
     def new_game_state():
         return {
             "stage": STAGE_TITLE,
+            "level": 0,
             "score": 0,
             "combo": 0,
+            "hits_this_level": 0,
             "start_ticks": None,
-            "mole": Mole(),
+            "mole": Mole(LEVELS[0]["mole_timeout"]),
             "last_click_time": None,
             "last_click_pos": None,
             "jump_flash_until": 0,
@@ -975,14 +1014,35 @@ def run_game():
             "shake_strength": 0,
             "popups": [],
             "dust_puffs": [],
+            "won": False,
         }
 
     state = new_game_state()
 
+    def start_level():
+        level = LEVELS[state["level"]]
+        state["hits_this_level"] = 0
+        state["combo"] = 0
+        state["start_ticks"] = pygame.time.get_ticks()
+        state["mole"] = Mole(level["mole_timeout"])
+        state["last_click_time"] = None
+        state["last_click_pos"] = None
+
     def start_round():
         state["stage"] = STAGE_PLAYING
-        state["start_ticks"] = pygame.time.get_ticks()
-        state["mole"] = Mole()
+        state["level"] = 0
+        state["score"] = 0
+        state["won"] = False
+        start_level()
+
+    def complete_current_level():
+        state["level"] += 1
+
+        if state["level"] >= len(LEVELS):
+            state["won"] = True
+            state["stage"] = STAGE_GAME_OVER
+        else:
+            start_level()
 
     running = True
     while running:
@@ -991,17 +1051,22 @@ def run_game():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
+
                 elif event.key == pygame.K_r and state["stage"] == STAGE_GAME_OVER:
                     state = new_game_state()
+
                 elif event.key == pygame.K_SPACE and state["stage"] == STAGE_TITLE:
                     start_round()
+
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if state["stage"] == STAGE_TITLE:
                     start_round()
                     continue
+
                 if state["stage"] != STAGE_PLAYING:
                     continue
 
@@ -1010,9 +1075,12 @@ def run_game():
                 last_pos = state["last_click_pos"]
 
                 is_double_click = False
-                if last_time is not None:
+                if last_time is not None and last_pos is not None:
                     time_gap = now - last_time
-                    dist = math.hypot(click_pos[0] - last_pos[0], click_pos[1] - last_pos[1])
+                    dist = math.hypot(
+                        click_pos[0] - last_pos[0],
+                        click_pos[1] - last_pos[1]
+                    )
                     if time_gap <= DOUBLE_CLICK_TIME_MS and dist <= DOUBLE_CLICK_DIST:
                         is_double_click = True
 
@@ -1020,23 +1088,34 @@ def run_game():
                     state["jump_flash_until"] = now + 150
                     state["hammer_effect"] = (click_pos, now)
                     mole = state["mole"]
+
                     if mole.contains(click_pos):
                         mole.register_hit(now)
+                        state["hits_this_level"] += 1
                         state["combo"] += 1
+
                         gained = 1 + (1 if state["combo"] >= 5 else 0)
                         state["score"] += gained
+
                         state["popups"].append(
                             FloatingText(mole.position, f"+{gained}", COLOR_POPUP, font_popup)
                         )
                         state["dust_puffs"].append(DustPuff(mole.position))
                         state["shake_until"] = now + 120
                         state["shake_strength"] = 5
+
+                        level = LEVELS[state["level"]]
+                        if state["hits_this_level"] >= level["hits_required"]:
+                            complete_current_level()
+
                     state["last_click_time"] = None
                     state["last_click_pos"] = None
                 else:
                     state["last_click_time"] = now
                     state["last_click_pos"] = click_pos
 
+        # This remains mouse-driven for now. Later, replace the body of
+        # get_player_position() with the UDP / XYZ sensor position.
         cursor_pos = get_player_position(pygame.mouse.get_pos())
 
         if state["stage"] == STAGE_TITLE:
@@ -1044,19 +1123,23 @@ def run_game():
             screen.blit(render_target, (0, 0))
 
         elif state["stage"] == STAGE_PLAYING:
+            level = LEVELS[state["level"]]
             elapsed = (now - state["start_ticks"]) / 1000.0
-            time_remaining = ROUND_LENGTH_SECONDS - elapsed
+            time_remaining = level["time"] - elapsed
 
             if time_remaining <= 0:
+                state["won"] = False
                 state["stage"] = STAGE_GAME_OVER
             else:
                 mole = state["mole"]
                 old_state = mole.state
                 mole.update(now)
+
                 if old_state != Mole.MISSED and mole.state == Mole.MISSED:
                     state["combo"] = 0  # escaped mole breaks the combo
+
                 if mole.should_remove():
-                    state["mole"] = Mole()
+                    state["mole"] = Mole(level["mole_timeout"])
 
             state["popups"] = [p for p in state["popups"] if not p.is_dead(now)]
             state["dust_puffs"] = [d for d in state["dust_puffs"] if not d.is_dead(now)]
@@ -1082,21 +1165,45 @@ def run_game():
 
             jump_flash = now < state["jump_flash_until"]
             draw_cursor(render_target, cursor_pos, jump_flash)
-            draw_hud(render_target, font, font_small, state["score"], time_remaining, state["combo"])
+
+            draw_hud(
+                render_target,
+                font,
+                font_small,
+                state["score"],
+                time_remaining,
+                state["combo"],
+                state["level"] + 1,
+                level["name"],
+                state["hits_this_level"],
+                level["hits_required"],
+                level["time"],
+            )
 
             if player_is_too_close_to_screen(cursor_pos):
                 draw_safety_warning(render_target, font)
 
             if now < state["shake_until"]:
                 strength = state["shake_strength"]
-                offset = (random.randint(-strength, strength), random.randint(-strength, strength))
+                offset = (
+                    random.randint(-strength, strength),
+                    random.randint(-strength, strength)
+                )
             else:
                 offset = (0, 0)
+
             screen.fill((0, 0, 0))
             screen.blit(render_target, offset)
 
         else:  # STAGE_GAME_OVER
-            draw_game_over(render_target, now, font_big, font, state["score"])
+            draw_game_over(
+                render_target,
+                now,
+                font_big,
+                font,
+                state["score"],
+                state["won"],
+            )
             screen.blit(render_target, (0, 0))
 
         pygame.display.flip()
