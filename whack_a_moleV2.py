@@ -6,8 +6,8 @@ Scope (per team scrum plan):
 - Basic pygame window with background
 - Moving cursor (mouse-driven placeholder, swap to ESP32/sensor input later)
 - One mole spawning at a random hole, disappearing after a timeout
-- Whack action = double-click, standing in for the "jump" motion the real
-  sensor rig will detect (low sensor clear + high sensor triggered)
+- Whack action = single left-click for the prototype. Later this can be
+  replaced by the real sensor-detected jump/whack event.
 - Score counter + simple fixed-length timer (60s)
 
 v3 added: mole animation states (spawn/idle/hit/missed), spinning star
@@ -46,24 +46,28 @@ LEVELS = [
         "name": "Warm Up",
         "time": 60,
         "mole_timeout": 2.2,
+        "movement_speed": 1.0,
         "hits_required": 8
     },
     {
         "name": "Quick Whack",
         "time": 60,
         "mole_timeout": 1.6,
+        "movement_speed": 1.2,
         "hits_required": 12
     },
     {
         "name": "Mole Rush",
         "time": 60,
         "mole_timeout": 1.1,
+        "movement_speed": 1.45,
         "hits_required": 16
     },
     {
         "name": "Expert Mode",
         "time": 60,
         "mole_timeout": 0.8,
+        "movement_speed": 1.75,
         "hits_required": 20
     }
 ]   
@@ -76,8 +80,8 @@ CURSOR_RADIUS = 10
 SAFETY_ZONE_HEIGHT = 105
 SAFETY_WARNING_DISTANCE_CM = 50
 
-DOUBLE_CLICK_TIME_MS = 400      # max gap between clicks to count as a "jump"
-DOUBLE_CLICK_DIST = 30          # max pixel drift allowed between the two clicks
+# Prototype input: one left-click counts as a whack.
+# Later this click event can be replaced with the ESP32/sensor jump event.
 
 # Mole animation timings (ms unless noted)
 MOLE_SPAWN_MS = 150
@@ -480,12 +484,13 @@ class Mole:
 
     MISS_LINES = ["Missed me!", "Too slow!", "Ha! Nice try", "Nyeh heh heh"]
 
-    def __init__(self, timeout=2.0):
+    def __init__(self, timeout=2.0, movement_speed=1.0):
         self.position = random.choice(HOLE_POSITIONS)
         self.spawn_time = pygame.time.get_ticks()
         self.state = Mole.SPAWNING
         self.state_time = self.spawn_time
         self.timeout = timeout
+        self.movement_speed = movement_speed
         self.blink_seed = random.uniform(0, 1000)
         self.miss_line = random.choice(Mole.MISS_LINES)
         self.star_burst = None
@@ -495,15 +500,19 @@ class Mole:
         return (now - self.spawn_time) / 1000.0
 
     def update(self, now):
-        if self.state == Mole.SPAWNING and (now - self.state_time) >= MOLE_SPAWN_MS:
+        spawn_ms = MOLE_SPAWN_MS / self.movement_speed
+        hit_ms = MOLE_HIT_MS / self.movement_speed
+        miss_ms = MOLE_MISS_MS / self.movement_speed
+
+        if self.state == Mole.SPAWNING and (now - self.state_time) >= spawn_ms:
             self.state = Mole.IDLE
             self.state_time = now
         elif self.state == Mole.IDLE and self._elapsed_total(now) >= self.timeout:
             self.state = Mole.MISSED
             self.state_time = now
-        elif self.state == Mole.HIT and (now - self.state_time) >= MOLE_HIT_MS:
+        elif self.state == Mole.HIT and (now - self.state_time) >= hit_ms:
             self.state = Mole.HIDDEN
-        elif self.state == Mole.MISSED and (now - self.state_time) >= MOLE_MISS_MS:
+        elif self.state == Mole.MISSED and (now - self.state_time) >= miss_ms:
             self.state = Mole.HIDDEN
 
     def is_expired(self):
@@ -540,11 +549,13 @@ class Mole:
         shake_x = 0
 
         if self.state == Mole.SPAWNING:
-            t = clamp((now - self.state_time) / MOLE_SPAWN_MS)
+            spawn_ms = MOLE_SPAWN_MS / self.movement_speed
+            t = clamp((now - self.state_time) / spawn_ms)
             rise = ease_out_back(t)
 
         elif self.state == Mole.IDLE:
-            bob = math.sin((now - self.spawn_time) / 260.0) * 2
+            bob_period = 260.0 / self.movement_speed
+            bob = math.sin((now - self.spawn_time) / bob_period) * 2
             rise = 1.0
             base_y += bob
 
@@ -552,18 +563,21 @@ class Mole:
             color = COLOR_MOLE_HIT
             light, dark = COLOR_MOLE_HIT_LIGHT, COLOR_MOLE_HIT_DARK
             face_mode = "dizzy"
-            if (now - self.state_time) < MOLE_SQUASH_MS:
-                squash_phase = clamp((now - self.state_time) / MOLE_SQUASH_MS)
+            squash_ms = MOLE_SQUASH_MS / self.movement_speed
+            hit_ms = MOLE_HIT_MS / self.movement_speed
+            if (now - self.state_time) < squash_ms:
+                squash_phase = clamp((now - self.state_time) / squash_ms)
                 squash_x = lerp(1.0, 1.35, math.sin(squash_phase * math.pi))
                 squash_y = lerp(1.0, 0.65, math.sin(squash_phase * math.pi))
                 rise = 1.0
             else:
-                sink_t = clamp((now - self.state_time - MOLE_SQUASH_MS) /
-                                (MOLE_HIT_MS - MOLE_SQUASH_MS))
+                sink_t = clamp((now - self.state_time - squash_ms) /
+                                max(1, hit_ms - squash_ms))
                 rise = lerp(1.0, 0.0, ease_in_quad(sink_t))
 
         elif self.state == Mole.MISSED:
-            t = clamp((now - self.state_time) / MOLE_MISS_MS)
+            miss_ms = MOLE_MISS_MS / self.movement_speed
+            t = clamp((now - self.state_time) / miss_ms)
             face_mode = "taunt"
             if t < 0.65:
                 taunt_t = t / 0.65
@@ -628,7 +642,8 @@ class Mole:
 
         # taunt speech bubble while missed
         if self.state == Mole.MISSED:
-            t = clamp((now - self.state_time) / MOLE_MISS_MS)
+            miss_ms = MOLE_MISS_MS / self.movement_speed
+            t = clamp((now - self.state_time) / miss_ms)
             if t < 0.65:
                 self._draw_taunt_bubble(surface, cx, body_y - radius_y, t / 0.65)
 
@@ -1005,9 +1020,10 @@ def run_game():
             "combo": 0,
             "hits_this_level": 0,
             "start_ticks": None,
-            "mole": Mole(LEVELS[0]["mole_timeout"]),
-            "last_click_time": None,
-            "last_click_pos": None,
+            "mole": Mole(
+                LEVELS[0]["mole_timeout"],
+                LEVELS[0]["movement_speed"]
+            ),
             "jump_flash_until": 0,
             "hammer_effect": None,   # (pos, start_time) or None
             "shake_until": 0,
@@ -1024,9 +1040,10 @@ def run_game():
         state["hits_this_level"] = 0
         state["combo"] = 0
         state["start_ticks"] = pygame.time.get_ticks()
-        state["mole"] = Mole(level["mole_timeout"])
-        state["last_click_time"] = None
-        state["last_click_pos"] = None
+        state["mole"] = Mole(
+            level["mole_timeout"],
+            level["movement_speed"]
+        )
 
     def start_round():
         state["stage"] = STAGE_PLAYING
@@ -1063,6 +1080,11 @@ def run_game():
                     start_round()
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
+                # Temporary prototype control: ONE left-click = one whack.
+                # Later this block can be triggered by the ESP32/sensor jump event.
+                if event.button != 1:
+                    continue
+
                 if state["stage"] == STAGE_TITLE:
                     start_round()
                     continue
@@ -1071,48 +1093,28 @@ def run_game():
                     continue
 
                 click_pos = event.pos
-                last_time = state["last_click_time"]
-                last_pos = state["last_click_pos"]
+                state["jump_flash_until"] = now + 150
+                state["hammer_effect"] = (click_pos, now)
+                mole = state["mole"]
 
-                is_double_click = False
-                if last_time is not None and last_pos is not None:
-                    time_gap = now - last_time
-                    dist = math.hypot(
-                        click_pos[0] - last_pos[0],
-                        click_pos[1] - last_pos[1]
+                if mole.contains(click_pos):
+                    mole.register_hit(now)
+                    state["hits_this_level"] += 1
+                    state["combo"] += 1
+
+                    gained = 1 + (1 if state["combo"] >= 5 else 0)
+                    state["score"] += gained
+
+                    state["popups"].append(
+                        FloatingText(mole.position, f"+{gained}", COLOR_POPUP, font_popup)
                     )
-                    if time_gap <= DOUBLE_CLICK_TIME_MS and dist <= DOUBLE_CLICK_DIST:
-                        is_double_click = True
+                    state["dust_puffs"].append(DustPuff(mole.position))
+                    state["shake_until"] = now + 120
+                    state["shake_strength"] = 5
 
-                if is_double_click:
-                    state["jump_flash_until"] = now + 150
-                    state["hammer_effect"] = (click_pos, now)
-                    mole = state["mole"]
-
-                    if mole.contains(click_pos):
-                        mole.register_hit(now)
-                        state["hits_this_level"] += 1
-                        state["combo"] += 1
-
-                        gained = 1 + (1 if state["combo"] >= 5 else 0)
-                        state["score"] += gained
-
-                        state["popups"].append(
-                            FloatingText(mole.position, f"+{gained}", COLOR_POPUP, font_popup)
-                        )
-                        state["dust_puffs"].append(DustPuff(mole.position))
-                        state["shake_until"] = now + 120
-                        state["shake_strength"] = 5
-
-                        level = LEVELS[state["level"]]
-                        if state["hits_this_level"] >= level["hits_required"]:
-                            complete_current_level()
-
-                    state["last_click_time"] = None
-                    state["last_click_pos"] = None
-                else:
-                    state["last_click_time"] = now
-                    state["last_click_pos"] = click_pos
+                    level = LEVELS[state["level"]]
+                    if state["hits_this_level"] >= level["hits_required"]:
+                        complete_current_level()
 
         # This remains mouse-driven for now. Later, replace the body of
         # get_player_position() with the UDP / XYZ sensor position.
@@ -1139,7 +1141,10 @@ def run_game():
                     state["combo"] = 0  # escaped mole breaks the combo
 
                 if mole.should_remove():
-                    state["mole"] = Mole(level["mole_timeout"])
+                    state["mole"] = Mole(
+                        level["mole_timeout"],
+                        level["movement_speed"]
+                    )
 
             state["popups"] = [p for p in state["popups"] if not p.is_dead(now)]
             state["dust_puffs"] = [d for d in state["dust_puffs"] if not d.is_dead(now)]
