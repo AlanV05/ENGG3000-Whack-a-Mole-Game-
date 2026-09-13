@@ -25,8 +25,10 @@ v4 (this pass) is purely a visual/interface upgrade, no new mechanics:
 - A proper title screen and a game-over screen with a star rating,
   instead of dropping straight into gameplay
 
-NOT included yet (Sprint 2 territory): multiple levels, difficulty
-scaling, real audio, calibration UI
+Sprint 2 additions in this version:
+- Multiple mole types, reaction bonus, combo score multipliers
+- Level transition screens and prototype sensor calibration/status UI
+- Real audio remains future work
 """
 
 import pygame
@@ -70,7 +72,36 @@ LEVELS = [
         "movement_speed": 1.75,
         "hits_required": 20
     }
-]   
+]
+
+# ---------------------------------------------------------------------------
+# Sprint 2 gameplay add-ons
+# ---------------------------------------------------------------------------
+# Mole types are chosen randomly.  Keep this PC-side so ESP32 sensor code
+# only has to report player position / hit events.
+MOLE_TYPES = {
+    "normal": {"weight": 70, "base_points": 1, "label": "NORMAL"},
+    "golden": {"weight": 15, "base_points": 3, "label": "GOLD +3"},
+    "red":    {"weight": 8,  "base_points": -2, "label": "AVOID!"},
+    "blue":   {"weight": 7,  "base_points": 1, "label": "TIME +3s"},
+}
+
+# Reaction bonus is based on how quickly a valid mole is hit after spawning.
+REACTION_FAST_SECONDS = 0.50
+REACTION_GOOD_SECONDS = 0.90
+REACTION_FAST_BONUS = 2
+REACTION_GOOD_BONUS = 1
+
+# Combo multiplier thresholds.
+COMBO_X2_AT = 5
+COMBO_X3_AT = 10
+
+# Level-transition screen duration.
+LEVEL_TRANSITION_MS = 1800
+
+# Prototype sensor status.  Later replace these booleans with UDP health
+# checks (for example: sensor is online if a packet arrived in the last second).
+DEFAULT_SENSOR_STATUS = {1: True, 2: True, 3: True}
 
 HOLE_RADIUS = 55
 MOLE_RADIUS = 45
@@ -81,7 +112,7 @@ SAFETY_ZONE_HEIGHT = 105
 SAFETY_WARNING_DISTANCE_CM = 50
 
 # Prototype input: one left-click counts as a whack.
-# Later this click event can be replaced with the ESP32/sensor jump event.
+# Later this click event can be replaced with the ESP32/sensor hit event.
 
 # Mole animation timings (ms unless noted)
 MOLE_SPAWN_MS = 150
@@ -107,6 +138,17 @@ COLOR_MOLE_LIGHT = (196, 152, 112)
 COLOR_MOLE_HIT = (232, 96, 96)
 COLOR_MOLE_HIT_LIGHT = (250, 150, 140)
 COLOR_MOLE_HIT_DARK = (185, 60, 60)
+COLOR_MOLE_GOLD = (238, 190, 55)
+COLOR_MOLE_GOLD_LIGHT = (255, 229, 125)
+COLOR_MOLE_GOLD_DARK = (180, 125, 25)
+COLOR_MOLE_RED = (205, 72, 72)
+COLOR_MOLE_RED_LIGHT = (245, 130, 120)
+COLOR_MOLE_RED_DARK = (145, 42, 42)
+COLOR_MOLE_BLUE = (80, 145, 215)
+COLOR_MOLE_BLUE_LIGHT = (145, 200, 250)
+COLOR_MOLE_BLUE_DARK = (45, 90, 155)
+COLOR_SENSOR_OK = (55, 165, 85)
+COLOR_SENSOR_BAD = (205, 70, 60)
 COLOR_CURSOR = (220, 30, 30)
 COLOR_TEXT = (40, 34, 28)
 COLOR_TEXT_SOFT = (90, 80, 70)
@@ -202,6 +244,11 @@ def get_player_position(mouse_pos):
     doesn't need to change when real sensor input is wired in.
     """
     return mouse_pos
+
+
+def sensors_ready(sensor_status):
+    """True only when all three ESP32 sensor streams are available."""
+    return all(sensor_status.get(sensor_id, False) for sensor_id in (1, 2, 3))
 
 
 # ---------------------------------------------------------------------------
@@ -491,9 +538,20 @@ class Mole:
         self.state_time = self.spawn_time
         self.timeout = timeout
         self.movement_speed = movement_speed
+
+        mole_names = list(MOLE_TYPES.keys())
+        mole_weights = [MOLE_TYPES[name]["weight"] for name in mole_names]
+        self.mole_type = random.choices(mole_names, weights=mole_weights, k=1)[0]
+
         self.blink_seed = random.uniform(0, 1000)
         self.miss_line = random.choice(Mole.MISS_LINES)
         self.star_burst = None
+
+    def reaction_time_seconds(self, now):
+        return max(0.0, (now - self.spawn_time) / 1000.0)
+
+    def base_points(self):
+        return MOLE_TYPES[self.mole_type]["base_points"]
 
     # -- state handling ----------------------------------------------------
     def _elapsed_total(self, now):
@@ -545,6 +603,13 @@ class Mole:
         squash_x, squash_y = 1.0, 1.0
         color = COLOR_MOLE
         light, dark = COLOR_MOLE_LIGHT, COLOR_MOLE_DARK
+        if self.mole_type == "golden":
+            color, light, dark = COLOR_MOLE_GOLD, COLOR_MOLE_GOLD_LIGHT, COLOR_MOLE_GOLD_DARK
+        elif self.mole_type == "red":
+            color, light, dark = COLOR_MOLE_RED, COLOR_MOLE_RED_LIGHT, COLOR_MOLE_RED_DARK
+        elif self.mole_type == "blue":
+            color, light, dark = COLOR_MOLE_BLUE, COLOR_MOLE_BLUE_LIGHT, COLOR_MOLE_BLUE_DARK
+
         face_mode = "happy"
         shake_x = 0
 
@@ -632,6 +697,13 @@ class Mole:
                                 max(3, int(radius_x * 0.14)))
 
         self._draw_face(surface, cx, body_y, radius_x, radius_y, face_mode, now)
+
+        # Small type marker.  The body colour is the main visual cue; this
+        # label keeps special moles understandable during demonstrations.
+        if self.state in (Mole.SPAWNING, Mole.IDLE):
+            type_font = pygame.font.SysFont("arial", 11, bold=True)
+            label = type_font.render(MOLE_TYPES[self.mole_type]["label"], True, (45, 35, 25))
+            surface.blit(label, label.get_rect(center=(int(cx), int(body_y - radius_y - 10))))
 
         surface.set_clip(old_clip)
 
@@ -793,8 +865,8 @@ def draw_holes(surface):
                 )
 
 
-def draw_cursor(surface, pos, jump_flash):
-    radius = CURSOR_RADIUS + (6 if jump_flash else 0)
+def draw_cursor(surface, pos, hit_flash):
+    radius = CURSOR_RADIUS + (6 if hit_flash else 0)
     draw_glow(surface, pos, radius + 10, COLOR_CURSOR, steps=3, max_alpha=60)
     pygame.draw.circle(surface, COLOR_CURSOR, pos, radius)
     pygame.draw.circle(surface, (255, 255, 255), pos, radius, 2)
@@ -802,7 +874,7 @@ def draw_cursor(surface, pos, jump_flash):
 
 def draw_hammer_hit(surface, pos, t):
     """
-    A quick little hammer-head flash at the whack point when a jump lands.
+    A quick little hammer-head flash at the whack point when a whack lands.
     t goes 0 -> 1 over the effect's short lifetime.
     """
     swing = ease_in_quad(t)
@@ -890,8 +962,14 @@ def draw_hud(surface, font, small_font, score, time_remaining, combo,
         f"Level {level_number}: {level_name}", True, COLOR_TEXT
     )
     progress_label = f"Hits {hits_this_level}/{hits_required}"
+    if combo >= COMBO_X3_AT:
+        score_multiplier = 3
+    elif combo >= COMBO_X2_AT:
+        score_multiplier = 2
+    else:
+        score_multiplier = 1
     if combo >= 2:
-        progress_label += f"   Combo x{combo}!"
+        progress_label += f"   Combo {combo} | Score x{score_multiplier}"
     progress_text = pygame.font.SysFont("arial", 15, bold=(combo >= 2)).render(
         progress_label, True, (200, 60, 40) if combo >= 2 else COLOR_TEXT_SOFT
     )
@@ -961,6 +1039,73 @@ def draw_title_screen(surface, now, font_title, font_small):
     surface.blit(prompt_surf, prompt_surf.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 70)))
 
 
+def draw_sensor_calibration(surface, now, font_big, font_small, sensor_status):
+    """Prototype calibration/status screen for the three ESP32 sensors."""
+    draw_background(surface, now)
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    overlay.fill((255, 255, 255, 105))
+    surface.blit(overlay, (0, 0))
+
+    panel = pygame.Rect(SCREEN_WIDTH // 2 - 300, 120, 600, 400)
+    draw_glass_panel(surface, panel, radius=20)
+
+    title = font_big.render("Sensor Check", True, COLOR_TITLE)
+    surface.blit(title, title.get_rect(center=(panel.centerx, panel.y + 55)))
+
+    subtitle = font_small.render(
+        "ESP32 / ultrasonic status before gameplay", True, COLOR_TEXT_SOFT
+    )
+    surface.blit(subtitle, subtitle.get_rect(center=(panel.centerx, panel.y + 95)))
+
+    for index, sensor_id in enumerate((1, 2, 3)):
+        online = sensor_status.get(sensor_id, False)
+        y = panel.y + 155 + index * 62
+        color = COLOR_SENSOR_OK if online else COLOR_SENSOR_BAD
+        pygame.draw.circle(surface, color, (panel.x + 115, y), 12)
+        status_word = "CONNECTED" if online else "NOT CONNECTED"
+        text = font_small.render(f"Sensor {sensor_id}: {status_word}", True, COLOR_TEXT)
+        surface.blit(text, (panel.x + 145, y - text.get_height() // 2))
+
+    if sensors_ready(sensor_status):
+        message = "All sensors ready - press SPACE to continue"
+        color = COLOR_SENSOR_OK
+    else:
+        message = "Waiting for all 3 sensors..."
+        color = COLOR_SENSOR_BAD
+
+    msg = font_small.render(message, True, color)
+    surface.blit(msg, msg.get_rect(center=(panel.centerx, panel.bottom - 70)))
+
+    test_note = pygame.font.SysFont("arial", 14).render(
+        "Prototype test: keys 1 / 2 / 3 toggle sensor status", True, COLOR_TEXT_SOFT
+    )
+    surface.blit(test_note, test_note.get_rect(center=(panel.centerx, panel.bottom - 35)))
+
+
+def draw_level_transition(surface, now, font_big, font_small, level_number, level):
+    draw_background(surface, now)
+    draw_holes(surface)
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    overlay.fill((20, 25, 30, 115))
+    surface.blit(overlay, (0, 0))
+
+    panel = pygame.Rect(SCREEN_WIDTH // 2 - 270, 170, 540, 270)
+    draw_glass_panel(surface, panel, radius=22)
+
+    heading = font_big.render(f"LEVEL {level_number}", True, COLOR_TITLE)
+    name = font_small.render(level["name"], True, COLOR_TEXT)
+    target = font_small.render(
+        f"Target: {level['hits_required']} hits   |   Mole speed x{level['movement_speed']}",
+        True, COLOR_TEXT_SOFT
+    )
+    prompt = font_small.render("Get ready!", True, (200, 80, 45))
+
+    surface.blit(heading, heading.get_rect(center=(panel.centerx, panel.y + 65)))
+    surface.blit(name, name.get_rect(center=(panel.centerx, panel.y + 120)))
+    surface.blit(target, target.get_rect(center=(panel.centerx, panel.y + 165)))
+    surface.blit(prompt, prompt.get_rect(center=(panel.centerx, panel.y + 220)))
+
+
 def draw_game_over(surface, now, font_big, font_small, score, won=False):
     draw_background(surface, now)
     overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
@@ -995,6 +1140,8 @@ def draw_game_over(surface, now, font_big, font_small, score, won=False):
 # Main game loop
 # ---------------------------------------------------------------------------
 STAGE_TITLE = "title"
+STAGE_CALIBRATION = "calibration"
+STAGE_LEVEL_TRANSITION = "level_transition"
 STAGE_PLAYING = "playing"
 STAGE_GAME_OVER = "game_over"
 
@@ -1020,11 +1167,15 @@ def run_game():
             "combo": 0,
             "hits_this_level": 0,
             "start_ticks": None,
+            "level_transition_start": None,
+            "time_bonus_seconds": 0.0,
+            "last_reaction_seconds": None,
+            "sensor_status": dict(DEFAULT_SENSOR_STATUS),
             "mole": Mole(
                 LEVELS[0]["mole_timeout"],
                 LEVELS[0]["movement_speed"]
             ),
-            "jump_flash_until": 0,
+            "hit_flash_until": 0,
             "hammer_effect": None,   # (pos, start_time) or None
             "shake_until": 0,
             "shake_strength": 0,
@@ -1035,22 +1186,26 @@ def run_game():
 
     state = new_game_state()
 
-    def start_level():
+    def prepare_level_transition():
         level = LEVELS[state["level"]]
         state["hits_this_level"] = 0
         state["combo"] = 0
+        state["time_bonus_seconds"] = 0.0
+        state["level_transition_start"] = pygame.time.get_ticks()
+        state["mole"] = Mole(level["mole_timeout"], level["movement_speed"])
+        state["stage"] = STAGE_LEVEL_TRANSITION
+
+    def begin_level_play():
+        level = LEVELS[state["level"]]
         state["start_ticks"] = pygame.time.get_ticks()
-        state["mole"] = Mole(
-            level["mole_timeout"],
-            level["movement_speed"]
-        )
+        state["mole"] = Mole(level["mole_timeout"], level["movement_speed"])
+        state["stage"] = STAGE_PLAYING
 
     def start_round():
-        state["stage"] = STAGE_PLAYING
         state["level"] = 0
         state["score"] = 0
         state["won"] = False
-        start_level()
+        state["stage"] = STAGE_CALIBRATION
 
     def complete_current_level():
         state["level"] += 1
@@ -1059,7 +1214,7 @@ def run_game():
             state["won"] = True
             state["stage"] = STAGE_GAME_OVER
         else:
-            start_level()
+            prepare_level_transition()
 
     running = True
     while running:
@@ -1079,9 +1234,19 @@ def run_game():
                 elif event.key == pygame.K_SPACE and state["stage"] == STAGE_TITLE:
                     start_round()
 
+                elif state["stage"] == STAGE_CALIBRATION:
+                    if event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
+                        sensor_id = int(event.unicode)
+                        state["sensor_status"][sensor_id] = not state["sensor_status"][sensor_id]
+                    elif event.key == pygame.K_SPACE and sensors_ready(state["sensor_status"]):
+                        prepare_level_transition()
+
+                elif event.key == pygame.K_SPACE and state["stage"] == STAGE_LEVEL_TRANSITION:
+                    begin_level_play()
+
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 # Temporary prototype control: ONE left-click = one whack.
-                # Later this block can be triggered by the ESP32/sensor jump event.
+                # Later this block can be triggered by the ESP32/sensor hit event.
                 if event.button != 1:
                     continue
 
@@ -1093,20 +1258,60 @@ def run_game():
                     continue
 
                 click_pos = event.pos
-                state["jump_flash_until"] = now + 150
+                state["hit_flash_until"] = now + 150
                 state["hammer_effect"] = (click_pos, now)
                 mole = state["mole"]
 
                 if mole.contains(click_pos):
                     mole.register_hit(now)
-                    state["hits_this_level"] += 1
-                    state["combo"] += 1
+                    reaction = mole.reaction_time_seconds(now)
+                    state["last_reaction_seconds"] = reaction
 
-                    gained = 1 + (1 if state["combo"] >= 5 else 0)
-                    state["score"] += gained
+                    # Red mole is a hazard: it costs points and breaks the combo.
+                    if mole.mole_type == "red":
+                        state["score"] = max(0, state["score"] + mole.base_points())
+                        state["combo"] = 0
+                        popup_text = f"{mole.base_points()} AVOID RED!"
+                        popup_color = COLOR_WARNING
+                    else:
+                        state["hits_this_level"] += 1
+                        state["combo"] += 1
+
+                        if reaction <= REACTION_FAST_SECONDS:
+                            reaction_bonus = REACTION_FAST_BONUS
+                            reaction_label = "FAST!"
+                        elif reaction <= REACTION_GOOD_SECONDS:
+                            reaction_bonus = REACTION_GOOD_BONUS
+                            reaction_label = "QUICK!"
+                        else:
+                            reaction_bonus = 0
+                            reaction_label = ""
+
+                        if state["combo"] >= COMBO_X3_AT:
+                            multiplier = 3
+                        elif state["combo"] >= COMBO_X2_AT:
+                            multiplier = 2
+                        else:
+                            multiplier = 1
+
+                        gained = (mole.base_points() + reaction_bonus) * multiplier
+                        state["score"] += gained
+
+                        if mole.mole_type == "blue":
+                            state["time_bonus_seconds"] += 3.0
+
+                        extras = []
+                        if reaction_label:
+                            extras.append(reaction_label)
+                        if multiplier > 1:
+                            extras.append(f"x{multiplier}")
+                        if mole.mole_type == "blue":
+                            extras.append("+3s")
+                        popup_text = f"+{gained}" + (" " + " ".join(extras) if extras else "")
+                        popup_color = COLOR_POPUP
 
                     state["popups"].append(
-                        FloatingText(mole.position, f"+{gained}", COLOR_POPUP, font_popup)
+                        FloatingText(mole.position, popup_text, popup_color, font_popup, life_ms=850)
                     )
                     state["dust_puffs"].append(DustPuff(mole.position))
                     state["shake_until"] = now + 120
@@ -1124,10 +1329,26 @@ def run_game():
             draw_title_screen(render_target, now, font_title, font_small)
             screen.blit(render_target, (0, 0))
 
+        elif state["stage"] == STAGE_CALIBRATION:
+            draw_sensor_calibration(
+                render_target, now, font_big, font_small, state["sensor_status"]
+            )
+            screen.blit(render_target, (0, 0))
+
+        elif state["stage"] == STAGE_LEVEL_TRANSITION:
+            level = LEVELS[state["level"]]
+            draw_level_transition(
+                render_target, now, font_big, font_small, state["level"] + 1, level
+            )
+            screen.blit(render_target, (0, 0))
+
+            if (now - state["level_transition_start"]) >= LEVEL_TRANSITION_MS:
+                begin_level_play()
+
         elif state["stage"] == STAGE_PLAYING:
             level = LEVELS[state["level"]]
             elapsed = (now - state["start_ticks"]) / 1000.0
-            time_remaining = level["time"] - elapsed
+            time_remaining = level["time"] + state["time_bonus_seconds"] - elapsed
 
             if time_remaining <= 0:
                 state["won"] = False
@@ -1168,8 +1389,8 @@ def run_game():
 
             draw_safety_zone(render_target, font_small)
 
-            jump_flash = now < state["jump_flash_until"]
-            draw_cursor(render_target, cursor_pos, jump_flash)
+            hit_flash = now < state["hit_flash_until"]
+            draw_cursor(render_target, cursor_pos, hit_flash)
 
             draw_hud(
                 render_target,
